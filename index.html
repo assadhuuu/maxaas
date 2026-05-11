@@ -1170,8 +1170,24 @@ async function doSignup() {
     return;
   }
 
-  // ── Insert profile row ──
+  // ── Wait for the session JWT to be active before inserting (fixes RLS race condition) ──
   btn.textContent = 'Setting up profile…';
+  let session = data.session;
+  if (!session) {
+    // Poll until the session is ready (up to ~5 seconds)
+    for (let i = 0; i < 10; i++) {
+      await new Promise(r => setTimeout(r, 500));
+      const { data: sd } = await sb.auth.getSession();
+      if (sd?.session) { session = sd.session; break; }
+    }
+  }
+  if (!session) {
+    alertEl.innerHTML = `<div class="alert alert-error">Account created but session could not be established. Please log in manually.</div>`;
+    btn.textContent = '→ Create account'; btn.disabled = false;
+    return;
+  }
+
+  // ── Insert profile row (session is now active, RLS will pass) ──
   const { error: insertError } = await sb.from('profiles').insert({
     id: data.user.id,
     username,
