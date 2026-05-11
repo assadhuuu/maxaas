@@ -1011,8 +1011,8 @@ function addLinkRow(label = '', url = '') {
   const row = document.createElement('div');
   row.className = 'link-row';
   row.innerHTML = `
-    <input class="form-input link-label-input" type="text" placeholder="Label" value="${escHtml(label)}" />
-    <input class="form-input link-url-input" type="url" placeholder="https://..." value="${escHtml(url)}" />
+    <input class="form-input link-label-input" type="text" placeholder="Label (e.g. Instagram)" value="${escHtml(label)}" />
+    <input class="form-input link-url-input" type="text" placeholder="https://..." value="${escHtml(url)}" />
     <button class="btn-icon" onclick="this.closest('.link-row').remove()">×</button>
   `;
   list.appendChild(row);
@@ -1037,17 +1037,27 @@ async function saveLinks() {
   const links = [];
   rows.forEach(row => {
     const label = row.querySelector('.link-label-input').value.trim();
-    const url = row.querySelector('.link-url-input').value.trim();
-    if (url) links.push({ label: label || url, url });
+    let url = row.querySelector('.link-url-input').value.trim();
+    if (url) {
+      // Auto-add https:// if missing
+      if (url && !url.startsWith('http://') && !url.startsWith('https://')) {
+        url = 'https://' + url;
+        row.querySelector('.link-url-input').value = url;
+      }
+      links.push({ label: label || url, url });
+    }
   });
+
+  console.log('Saving links:', JSON.stringify(links));
 
   const { error } = await sb
     .from('profiles')
-    .update({ links, updated_at: new Date().toISOString() })
+    .update({ links: links, updated_at: new Date().toISOString() })
     .eq('id', currentUser.id);
 
   if (error) {
-    alert('Failed to save links: ' + error.message);
+    console.error('Save links error:', error);
+    alert('Failed to save links: ' + error.message + '\n\nCode: ' + error.code + '\nHint: ' + error.hint);
     return;
   }
   // Keep local copy in sync
