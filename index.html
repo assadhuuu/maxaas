@@ -697,19 +697,23 @@
         <div class="modal-sub">Claim your username and build your bio link.</div>
         <div id="signup-alert"></div>
         <div class="form-group">
-          <label class="form-label">Username</label>
-          <input class="form-input" type="text" id="signup-username" placeholder="raage" />
-          <div class="form-hint">maxaas.u/?u=<span id="username-preview">username</span></div>
+          <label class="form-label">Choose a Username <span style="color:var(--danger)">*</span></label>
+          <input class="form-input" type="text" id="signup-username" placeholder="e.g. raage"
+            autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false" />
+          <div class="form-hint" id="username-hint">
+            Only letters, numbers, and underscores. Min 3 chars.<br/>
+            Your link: maxaas.u/?u=<span id="username-preview" style="color:var(--accent)">username</span>
+          </div>
         </div>
         <div class="form-group">
-          <label class="form-label">Email</label>
+          <label class="form-label">Email <span style="color:var(--danger)">*</span></label>
           <input class="form-input" type="email" id="signup-email" placeholder="you@example.com" />
         </div>
         <div class="form-group">
-          <label class="form-label">Password</label>
+          <label class="form-label">Password <span style="color:var(--danger)">*</span></label>
           <input class="form-input" type="password" id="signup-password" placeholder="Min 6 characters" />
         </div>
-        <button class="btn btn-primary form-submit" onclick="doSignup()">→ Create account</button>
+        <button class="btn btn-primary form-submit" id="signup-btn" onclick="doSignup()">→ Create account</button>
       </div>
     </div>
   </div>
@@ -948,14 +952,13 @@ async function loadDashboard() {
     .single();
 
   if (error || !data) {
-    // Profile might not exist yet — create placeholder
-    await sb.from('profiles').insert({
-      id: currentUser.id,
-      username: currentUser.email.split('@')[0].toLowerCase().replace(/[^a-z0-9_]/g, ''),
-      bio: '',
-      links: []
-    });
-    await loadDashboard();
+    // Profile row missing — this shouldn't happen after a proper sign-up.
+    // Show an error instead of silently inventing a username.
+    showView('home');
+    alert('Your profile could not be loaded. Please sign out and sign up again.');
+    await sb.auth.signOut();
+    currentUser = null;
+    updateNav();
     return;
   }
 
@@ -1018,8 +1021,18 @@ async function saveLinks() {
     if (url) links.push({ label: label || url, url });
   });
 
-  const { error } = await sb.from('profiles').update({ links, updated_at: new Date().toISOString() }).eq('id', currentUser.id);
-  if (!error) showSaveIndicator();
+  const { error } = await sb
+    .from('profiles')
+    .update({ links, updated_at: new Date().toISOString() })
+    .eq('id', currentUser.id);
+
+  if (error) {
+    alert('Failed to save links: ' + error.message);
+    return;
+  }
+  // Keep local copy in sync
+  if (currentProfile) currentProfile.links = links;
+  showSaveIndicator();
 }
 
 function showSaveIndicator() {
@@ -1060,7 +1073,18 @@ function switchTab(tab) {
 }
 
 document.getElementById('signup-username').addEventListener('input', function() {
-  document.getElementById('username-preview').textContent = this.value || 'username';
+  // Show what the username will actually be (sanitized)
+  const raw = this.value;
+  const sanitized = raw.toLowerCase().replace(/[^a-z0-9_]/g, '');
+  // Update preview with sanitized value
+  document.getElementById('username-preview').textContent = sanitized || 'username';
+  // Warn if sanitization changed the input
+  const hintEl = document.getElementById('username-hint');
+  if (raw && raw.toLowerCase() !== sanitized) {
+    hintEl.innerHTML = `<span style="color:var(--danger)">Special characters removed. Username will be: <strong>${escHtml(sanitized) || '—'}</strong></span><br/>Your link: maxaas.u/?u=<span style="color:var(--accent)">${escHtml(sanitized) || 'username'}</span>`;
+  } else {
+    hintEl.innerHTML = `Only letters, numbers, and underscores. Min 3 chars.<br/>Your link: maxaas.u/?u=<span style="color:var(--accent)">${escHtml(sanitized) || 'username'}</span>`;
+  }
 });
 
 async function doLogin() {
@@ -1081,39 +1105,92 @@ async function doLogin() {
 }
 
 async function doSignup() {
-  const username = document.getElementById('signup-username').value.trim().toLowerCase().replace(/[^a-z0-9_]/g, '');
+  const rawUsername = document.getElementById('signup-username').value.trim();
+  const username = rawUsername.toLowerCase().replace(/[^a-z0-9_]/g, '');
   const email = document.getElementById('signup-email').value.trim();
   const password = document.getElementById('signup-password').value;
   const alertEl = document.getElementById('signup-alert');
+  const btn = document.getElementById('signup-btn');
   alertEl.innerHTML = '';
 
-  if (!username || username.length < 3) {
+  // ── Validate username ──
+  if (!username) {
+    alertEl.innerHTML = `<div class="alert alert-error">Please choose a username.</div>`;
+    document.getElementById('signup-username').focus();
+    return;
+  }
+  if (username.length < 3) {
     alertEl.innerHTML = `<div class="alert alert-error">Username must be at least 3 characters.</div>`;
     return;
   }
+  if (username.length > 30) {
+    alertEl.innerHTML = `<div class="alert alert-error">Username must be 30 characters or fewer.</div>`;
+    return;
+  }
 
-  // Check username taken
-  const { data: existing } = await sb.from('profiles').select('id').eq('username', username).single();
+  // ── Validate email & password ──
+  if (!email) {
+    alertEl.innerHTML = `<div class="alert alert-error">Please enter your email.</div>`;
+    return;
+  }
+  if (password.length < 6) {
+    alertEl.innerHTML = `<div class="alert alert-error">Password must be at least 6 characters.</div>`;
+    return;
+  }
+
+  // ── Loading state ──
+  btn.textContent = 'Checking…';
+  btn.disabled = true;
+
+  // ── Check username uniqueness (use maybeSingle — returns null instead of error when no row found) ──
+  const { data: existing, error: checkError } = await sb
+    .from('profiles')
+    .select('id')
+    .eq('username', username)
+    .maybeSingle();
+
+  if (checkError) {
+    alertEl.innerHTML = `<div class="alert alert-error">Could not verify username. Please try again.</div>`;
+    btn.textContent = '→ Create account'; btn.disabled = false;
+    return;
+  }
   if (existing) {
-    alertEl.innerHTML = `<div class="alert alert-error">Username already taken.</div>`;
+    alertEl.innerHTML = `<div class="alert alert-error">The username "<strong>${escHtml(username)}</strong>" is already taken. Please choose another.</div>`;
+    btn.textContent = '→ Create account'; btn.disabled = false;
+    document.getElementById('signup-username').focus();
     return;
   }
 
-  const { data, error } = await sb.auth.signUp({ email, password });
-  if (error) {
-    alertEl.innerHTML = `<div class="alert alert-error">${escHtml(error.message)}</div>`;
+  // ── Create Supabase auth user ──
+  btn.textContent = 'Creating account…';
+  const { data, error: signupError } = await sb.auth.signUp({ email, password });
+  if (signupError) {
+    alertEl.innerHTML = `<div class="alert alert-error">${escHtml(signupError.message)}</div>`;
+    btn.textContent = '→ Create account'; btn.disabled = false;
     return;
   }
 
-  // Create profile row
-  await sb.from('profiles').insert({
+  // ── Insert profile row ──
+  btn.textContent = 'Setting up profile…';
+  const { error: insertError } = await sb.from('profiles').insert({
     id: data.user.id,
     username,
+    display_name: '',
     bio: '',
+    avatar_url: '',
     links: []
   });
 
+  if (insertError) {
+    // Auth user was created but profile insert failed — surface the error clearly
+    alertEl.innerHTML = `<div class="alert alert-error">Account created but profile setup failed: ${escHtml(insertError.message)}. Please contact support.</div>`;
+    btn.textContent = '→ Create account'; btn.disabled = false;
+    return;
+  }
+
+  // ── Success ──
   currentUser = data.user;
+  btn.textContent = '→ Create account'; btn.disabled = false;
   closeModal();
   updateNav();
   await loadDashboard();
