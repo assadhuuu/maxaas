@@ -14,9 +14,9 @@
       --surface: #0f1318;
       --surface2: #161c24;
       --border: #1e2732;
-      --accent: #00e5ff;
-      --accent2: #7c3aed;
-      --accent-glow: rgba(0, 229, 255, 0.15);
+      --accent: #00e676;
+      --accent2: #00c853;
+      --accent-glow: rgba(0, 230, 118, 0.15);
       --text: #e8edf5;
       --muted: #5a6a7e;
       --danger: #ff4560;
@@ -41,8 +41,8 @@
       position: fixed;
       inset: 0;
       background-image:
-        linear-gradient(rgba(0,229,255,0.03) 1px, transparent 1px),
-        linear-gradient(90deg, rgba(0,229,255,0.03) 1px, transparent 1px);
+        linear-gradient(rgba(0,230,118,0.03) 1px, transparent 1px),
+        linear-gradient(90deg, rgba(0,230,118,0.03) 1px, transparent 1px);
       background-size: 40px 40px;
       pointer-events: none;
       z-index: 0;
@@ -55,8 +55,8 @@
       left: -50%;
       width: 200%;
       height: 200%;
-      background: radial-gradient(ellipse at 30% 20%, rgba(124,58,237,0.08) 0%, transparent 50%),
-                  radial-gradient(ellipse at 70% 80%, rgba(0,229,255,0.06) 0%, transparent 50%);
+      background: radial-gradient(ellipse at 30% 20%, rgba(0,200,83,0.08) 0%, transparent 50%),
+                  radial-gradient(ellipse at 70% 80%, rgba(0,230,118,0.06) 0%, transparent 50%);
       pointer-events: none;
       z-index: 0;
     }
@@ -945,15 +945,31 @@ function getLinkIcon(url) {
 
 // ── DASHBOARD ──
 async function loadDashboard() {
-  const { data, error } = await sb
+  let { data, error } = await sb
     .from('profiles')
     .select('*')
     .eq('id', currentUser.id)
     .single();
 
+  // Profile row missing: happens when email confirmation is ON.
+  // User confirmed their email and logged in, but profile was never inserted.
+  // Recover using the username stored in auth metadata during sign-up.
   if (error || !data) {
-    // Profile row missing — this shouldn't happen after a proper sign-up.
-    // Show an error instead of silently inventing a username.
+    const metaUsername = currentUser.user_metadata?.username;
+    if (metaUsername) {
+      const { data: inserted, error: insertErr } = await sb.from('profiles').insert({
+        id: currentUser.id,
+        username: metaUsername,
+        display_name: '',
+        bio: '',
+        avatar_url: '',
+        links: []
+      }).select().single();
+      if (!insertErr && inserted) { data = inserted; error = null; }
+    }
+  }
+
+  if (error || !data) {
     showView('home');
     alert('Your profile could not be loaded. Please sign out and sign up again.');
     await sb.auth.signOut();
@@ -1161,33 +1177,46 @@ async function doSignup() {
     return;
   }
 
-  // ── Create Supabase auth user ──
+  // ── Create auth user (store username in metadata for post-confirm trigger) ──
   btn.textContent = 'Creating account…';
-  const { data, error: signupError } = await sb.auth.signUp({ email, password });
+  const { data, error: signupError } = await sb.auth.signUp({
+    email, password,
+    options: { data: { username } }
+  });
   if (signupError) {
     alertEl.innerHTML = `<div class="alert alert-error">${escHtml(signupError.message)}</div>`;
     btn.textContent = '→ Create account'; btn.disabled = false;
     return;
   }
 
-  // ── Wait for the session JWT to be active before inserting (fixes RLS race condition) ──
+  // ── Try to get a live session (email confirm OFF = instant session) ──
   btn.textContent = 'Setting up profile…';
   let session = data.session;
   if (!session) {
-    // Poll until the session is ready (up to ~5 seconds)
-    for (let i = 0; i < 10; i++) {
+    for (let i = 0; i < 6; i++) {
       await new Promise(r => setTimeout(r, 500));
       const { data: sd } = await sb.auth.getSession();
       if (sd?.session) { session = sd.session; break; }
     }
   }
+
+  // ── No session = email confirmation is ON, user must confirm first ──
   if (!session) {
-    alertEl.innerHTML = `<div class="alert alert-error">Account created but session could not be established. Please log in manually.</div>`;
     btn.textContent = '→ Create account'; btn.disabled = false;
+    closeModal();
+    showView('home');
+    const hero = document.querySelector('.hero-sub');
+    if (hero) {
+      const note = document.createElement('div');
+      note.className = 'alert alert-success';
+      note.style.cssText = 'margin-top:20px;max-width:420px;text-align:left';
+      note.innerHTML = '&#10003; Account created! Check your email (<strong>' + escHtml(email) + '</strong>) and click the confirmation link to activate your account.';
+      hero.after(note);
+    }
     return;
   }
 
-  // ── Insert profile row (session is now active, RLS will pass) ──
+  // ── Session live — insert profile row ──
   const { error: insertError } = await sb.from('profiles').insert({
     id: data.user.id,
     username,
@@ -1198,13 +1227,11 @@ async function doSignup() {
   });
 
   if (insertError) {
-    // Auth user was created but profile insert failed — surface the error clearly
-    alertEl.innerHTML = `<div class="alert alert-error">Account created but profile setup failed: ${escHtml(insertError.message)}. Please contact support.</div>`;
+    alertEl.innerHTML = `<div class="alert alert-error">Profile setup failed: ${escHtml(insertError.message)}</div>`;
     btn.textContent = '→ Create account'; btn.disabled = false;
     return;
   }
 
-  // ── Success ──
   currentUser = data.user;
   btn.textContent = '→ Create account'; btn.disabled = false;
   closeModal();
